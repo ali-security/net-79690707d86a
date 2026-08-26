@@ -1,0 +1,69 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Space-separated Go test names to run instead of the full suite"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build module zip and run tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Show toolchain
+        run: go version
+
+      # The published module zip is packed from the module tree, so stage a copy
+      # without .git and without the CI directory this fork adds: upstream
+      # golang.org/x/net ships no .github, and an extra member would diverge
+      # from the proxy zip. Packed before build/test so no byproduct leaks in.
+      - name: Stage module tree
+        run: |
+          mkdir -p "$RUNNER_TEMP/modsrc" dist
+          rsync -a --exclude=.git --exclude=.github ./ "$RUNNER_TEMP/modsrc/"
+
+      - name: Create module zip
+        run: |
+          cp -a .github/zipper "$RUNNER_TEMP/zipper"
+          cd "$RUNNER_TEMP/zipper"
+          go mod init sealbuild/zipper
+          go get golang.org/x/mod@v0.28.0
+          go run ./create_mod.go golang.org/x/net v0.45.0 "$RUNNER_TEMP/modsrc" "$GITHUB_WORKSPACE/dist/v0.45.0.zip"
+          unzip -l "$GITHUB_WORKSPACE/dist/v0.45.0.zip" | tail -n 5
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            go test -v -run "^($(echo '${{ inputs.test-filter }}' | tr ' ' '|'))$" ./...
+          else
+            go test ./...
+          fi
+
+      - name: Upload module zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: dist/v0.45.0.zip
+          if-no-files-found: error
